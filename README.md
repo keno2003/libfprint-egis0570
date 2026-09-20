@@ -6,7 +6,12 @@ including fingerprint authentication after installation, as reported by the
 hardware tester.
 
 Reliable Linux fingerprint authentication is urgently needed by affected Acer
-Swift owners. Additional testing on Swift laptops from 2019–2021 is welcome.
+Swift owners. The relevant model-year range is 2018–2020. Testing is especially
+welcome on **Acer Swift 3 SF314-52 (2018–2019)** and **Acer Swift 3 SF314-57
+(2020)**, which have been reported with this sensor. Those hardware reports
+confirm the sensor model, not compatibility with this driver; both Swift 3
+models still need testing with these patches. This driver has been tested on
+**Acer Swift 1 SF114-32 (2018–2019)**.
 Compatibility depends on the actual sensor and its initialization; support for
 the entire Swift lineup is not claimed.
 

@@ -2,8 +2,11 @@ Title: Draft: egis0570: add full-frame touch capture and feature matching
 
 Reliable Linux fingerprint authentication is urgently needed by affected Acer
 Swift owners. This contribution was tested on an Acer Swift 1 (Swift SF114-32)
-with Egis USB sensor 1c7a:0570. Reports from other Swift models, including laptops
-from 2019–2021, are welcome; support across that lineup has not been established.
+with Egis USB sensor 1c7a:0570. The relevant model-year range is 2018–2020.
+Testing is requested on Acer Swift 3 SF314-52 (2018–2019) and SF314-57 (2020):
+hardware reports identify this sensor in those models, but this driver has not
+yet been tested on them. The tested Swift 1 SF114-32 is a 2018–2019 model;
+support across the lineup has not been established.
 
 On an Acer Swift SF114-32 with USB sensor 1c7a:0570, enrollment using the existing
 swipe driver succeeds but subsequent verification fails. Full-frame stationary
