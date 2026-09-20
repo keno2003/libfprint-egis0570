@@ -2,18 +2,13 @@
 
 Full-frame touch capture and matching for the **Egis `1c7a:0570`** fingerprint
 sensor in libfprint. Tested successfully on **Acer Swift 1 (Swift SF114-32)**,
-including fingerprint authentication after installation, as reported by the
-hardware tester.
+including fingerprint authentication after installation.
 
 Reliable Linux fingerprint authentication is urgently needed by affected Acer
 Swift owners. The relevant model-year range is 2018–2020. Testing is especially
 welcome on **Acer Swift 3 SF314-52 (2018–2019)** and **Acer Swift 3 SF314-57
-(2020)**, which have been reported with this sensor. Those hardware reports
-confirm the sensor model, not compatibility with this driver; both Swift 3
-models still need testing with these patches. This driver has been tested on
-**Acer Swift 1 SF114-32 (2018–2019)**.
-Compatibility depends on the actual sensor and its initialization; support for
-the entire Swift lineup is not claimed.
+(2020)**, which have been reported with this sensor. Both Swift 3
+models still need testing with these patches. 
 
 ## The problem and the change
 
