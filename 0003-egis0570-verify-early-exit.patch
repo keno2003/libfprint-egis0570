@@ -1,0 +1,69 @@
+From 6c221ef10531876d1df311e3934e649f9102dbb7 Mon Sep 17 00:00:00 2001
+From: keno2003 <209372532+keno2003@users.noreply.github.com>
+Date: Mon, 21 Sep 2026 00:14:41 +0200
+Subject: [PATCH] egis0570: stop verification comparisons after a sufficient
+ match
+
+---
+ libfprint/drivers/egis0570touch.c | 16 +++++++++++-----
+ 1 file changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/libfprint/drivers/egis0570touch.c b/libfprint/drivers/egis0570touch.c
+index 4a601336..07cb40d9 100644
+--- a/libfprint/drivers/egis0570touch.c
++++ b/libfprint/drivers/egis0570touch.c
+@@ -38,7 +38,7 @@ G_DEFINE_TYPE (FpDeviceEgis0570Touch, fpi_device_egis0570touch, FP_TYPE_DEVICE);
+ enum { SEND_COMMAND, RECEIVE_REPLY, RECEIVE_FRAMES, PROCESS_FRAMES, N_STATES };
+ 
+ static guint
+-compare_print (Egis0570TouchFeatures *probe, FpPrint *print)
++compare_print (Egis0570TouchFeatures *probe, FpPrint *print, gboolean stop_on_match)
+ {
+   g_autoptr(GVariant) data = NULL;
+   g_autoptr(GVariant) samples = NULL;
+@@ -61,16 +61,22 @@ compare_print (Egis0570TouchFeatures *probe, FpPrint *print)
+                          fpi_egis0570touch_features_compare (gallery, probe));
+       fp_dbg ("Sample %zu score %u (experimental threshold %u)", i, score, MATCH_THRESHOLD);
+       best = MAX (best, score);
++      if (stop_on_match && best >= MATCH_THRESHOLD)
++        break;
+     }
+   return best;
+ }
+ 
+ static guint
+-compare_press (GPtrArray *probes, FpPrint *print)
++compare_press (GPtrArray *probes, FpPrint *print, gboolean stop_on_match)
+ {
+   guint best = 0;
+   for (guint i = 0; i < probes->len; i++)
+-    best = MAX (best, compare_print (g_ptr_array_index (probes, i), print));
++    {
++      best = MAX (best, compare_print (g_ptr_array_index (probes, i), print, stop_on_match));
++      if (stop_on_match && best >= MATCH_THRESHOLD)
++        break;
++    }
+   return best;
+ }
+ 
+@@ -148,7 +154,7 @@ process_press (FpDevice *dev)
+       {
+         FpPrint *print;
+         fpi_device_get_verify_data (dev, &print);
+-        gboolean match = compare_press (probes, print) >= MATCH_THRESHOLD;
++        gboolean match = compare_press (probes, print, TRUE) >= MATCH_THRESHOLD;
+         fpi_device_verify_report (dev, match ? FPI_MATCH_SUCCESS : FPI_MATCH_FAIL,
+                                   NULL, NULL);
+         self->finished = TRUE;
+@@ -163,7 +169,7 @@ process_press (FpDevice *dev)
+         for (guint i = 0; i < prints->len; i++)
+           {
+             FpPrint *print = g_ptr_array_index (prints, i);
+-            guint score = compare_press (probes, print);
++            guint score = compare_press (probes, print, FALSE);
+             if (score > best)
+               {
+                 best = score;
+-- 
+2.55.0
+

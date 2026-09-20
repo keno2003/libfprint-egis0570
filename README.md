@@ -32,6 +32,9 @@ The patches apply to upstream commit
   missing pixman build dependency.
 - `0002-egis0570-touch.patch`: adds touch capture, matching, template
   storage, build integration and storage tests.
+- `0003-egis0570-verify-early-exit.patch`: stops verification comparisons once
+  a sample meets the unchanged matching threshold. Image extraction and
+  identification ranking are unchanged; latency improvement is not yet measured.
 - `UPSTREAM-DRAFT.md`: proposed upstream merge-request description.
 
 No fingerprint images, enrollment templates, private capture logs or package
@@ -52,6 +55,7 @@ git clone https://gitlab.freedesktop.org/libfprint/libfprint.git libfprint-sourc
 git -C libfprint-source checkout -b egis0570-touch 6f9479c3d55f847c1b3769f28ceb99227f9858cf
 git -C libfprint-source apply ../0001-egis0570-pixman.patch
 git -C libfprint-source apply ../0002-egis0570-touch.patch
+git -C libfprint-source apply ../0003-egis0570-verify-early-exit.patch
 meson setup libfprint-source/build libfprint-source -Ddrivers=egis0570touch -Ddoc=false -Dinstalled-tests=false
 meson compile -C libfprint-source/build
 meson test -C libfprint-source/build --suite unit-tests --print-errorlogs
