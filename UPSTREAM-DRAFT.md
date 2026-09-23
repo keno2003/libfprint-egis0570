@@ -19,6 +19,13 @@ transform. Route 0570 to this path and preserve the existing 0571 implementation
 Include bounded template decoding and storage tests. Old image templates need
 re-enrollment.
 
+Authentication processes one 10-frame batch while the finger remains down;
+enrollment still collects separate touches. Matching runs in a worker with
+immutable template snapshots. Verification stops at a sufficient match,
+identification preserves best-score selection, and each directional comparison
+is evaluated once. Subsequent operations on the same device object wait for
+finger removal. C++ exceptions are contained at the matcher interface.
+
 Tested successfully on Acer Swift 1 (Swift SF114-32), including fingerprint
 authentication after installation, as reported by the hardware tester.
 
@@ -31,5 +38,7 @@ The matcher is adapted from LGPL code in smox/libfprint-elan-04f3-0c63 at commit
 0f18837da8d691946673710d63a81b39d0782fca, with attribution retained. No biometric
 captures or templates are included.
 
-The cleaned review branch builds against upstream master at 6f9479c3; all four
-core/storage unit-test targets pass on that revision.
+The cleaned review branch builds against upstream master at 6f9479c3; all five
+unit-test targets pass, including synthetic capture/worker coverage. The latest
+worker/removal cleanup still requires a hardware regression check. Existing
+touch-driver templates remain compatible.

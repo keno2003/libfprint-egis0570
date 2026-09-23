@@ -35,6 +35,10 @@ The patches apply to upstream commit
 - `0003-egis0570-verify-early-exit.patch`: stops verification comparisons once
   a sample meets the unchanged matching threshold. Image extraction and
   identification ranking are unchanged; latency improvement is not yet measured.
+- `0004-egis0570-touch-cleanup.patch`: uses one 10-frame authentication batch,
+  removes duplicate comparisons, runs matching in a worker, and waits for
+  removal before a subsequent operation. Includes synthetic capture tests.
+- `IMPLEMENTATION.md`: code map, control flow, settings, and known limitations.
 - `UPSTREAM-DRAFT.md`: proposed upstream merge-request description.
 
 No fingerprint images, enrollment templates, private capture logs or package
@@ -56,6 +60,7 @@ git -C libfprint-source checkout -b egis0570-touch 6f9479c3d55f847c1b3769f28ceb9
 git -C libfprint-source apply ../0001-egis0570-pixman.patch
 git -C libfprint-source apply ../0002-egis0570-touch.patch
 git -C libfprint-source apply ../0003-egis0570-verify-early-exit.patch
+git -C libfprint-source apply ../0004-egis0570-touch-cleanup.patch
 meson setup libfprint-source/build libfprint-source -Ddrivers=egis0570touch -Ddoc=false -Dinstalled-tests=false
 meson compile -C libfprint-source/build
 meson test -C libfprint-source/build --suite unit-tests --print-errorlogs
@@ -75,8 +80,12 @@ authentication while evaluating the driver.
 ## Status
 
 The cleaned patch builds against the pinned upstream revision and passes all
-four core/storage unit-test targets. Hardware testing was performed on the
+five unit-test targets, including synthetic capture/worker tests. Hardware testing was performed on the
 Swift SF114-32. It has not been accepted upstream.
+
+Patch 0004 is a cleanup candidate awaiting hardware regression testing.
+See [the implementation guide](IMPLEMENTATION.md) for the exact behavior and
+remaining review work. Existing touch-driver enrollments remain compatible.
 
 Remaining work includes automated touch-driver USB replay coverage, broader
 matcher evaluation, initial-calibration robustness, suspend/resume and reboot

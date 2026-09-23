@@ -1,0 +1,812 @@
+From 726555567e4e9ea0c81482ae05c1777c9a5aaa5a Mon Sep 17 00:00:00 2001
+From: keno2003 <209372532+keno2003@users.noreply.github.com>
+Date: Wed, 23 Sep 2026 12:12:20 +0200
+Subject: [PATCH] egis0570: simplify touch capture and isolate matching work
+
+---
+ libfprint/drivers/egis0570touch-match.cpp |  60 +++--
+ libfprint/drivers/egis0570touch-proto.h   |   5 +-
+ libfprint/drivers/egis0570touch.c         | 262 ++++++++++++++--------
+ tests/meson.build                         |   5 +
+ tests/test-egis0570touch-driver.c         | 183 +++++++++++++++
+ 5 files changed, 397 insertions(+), 118 deletions(-)
+ create mode 100644 tests/test-egis0570touch-driver.c
+
+diff --git a/libfprint/drivers/egis0570touch-match.cpp b/libfprint/drivers/egis0570touch-match.cpp
+index 2688348b..3468baca 100644
+--- a/libfprint/drivers/egis0570touch-match.cpp
++++ b/libfprint/drivers/egis0570touch-match.cpp
+@@ -1,8 +1,3 @@
+-/* EXPERIMENTAL: adapted from smox/libfprint-elan-04f3-0c63, commit
+- * 0f18837da8d691946673710d63a81b39d0782fca. Geometry adapted for Egis 0570.
+- * The original ELAN measurements below do NOT validate these parameters
+- * for Egis. Authentication thresholds require independent evaluation.
+- */
+ /*
+  * Descriptor matching for the ELAN 04f3:0c63
+  * Copyright (C) 2026 Michael Brunner
+@@ -25,6 +20,8 @@
+ #include <algorithm>
+ #include <cstring>
+ #include <cmath>
++#include <exception>
++#include <memory>
+ #include <vector>
+ 
+ namespace {
+@@ -173,8 +170,8 @@ struct _Egis0570TouchFeatures
+ 
+ Egis0570TouchFeatures *
+ fpi_egis0570touch_features_extract (const uint16_t *frames,
+-                           guint           frame_count,
+-                           const uint16_t *background)
++                                  guint           frame_count,
++                                  const uint16_t *background) try
+ {
+   if (frames == nullptr || background == nullptr || frame_count == 0)
+     return nullptr;
+@@ -205,10 +202,15 @@ fpi_egis0570touch_features_extract (const uint16_t *frames,
+   if (best_keypoints.empty ())
+     return nullptr;
+ 
+-  auto *features = new _Egis0570TouchFeatures;
++  auto features = std::make_unique<_Egis0570TouchFeatures> ();
+   features->keypoints = std::move (best_keypoints);
+   features->descriptors = std::move (best_descriptors);
+-  return features;
++  return features.release ();
++}
++catch (const std::exception &)
++{
++  /* No C++ exception may escape into the C driver; NULL requests a retry. */
++  return nullptr;
+ }
+ 
+ guint
+@@ -222,14 +224,14 @@ fpi_egis0570touch_features_keypoint_count (Egis0570TouchFeatures *features)
+  *
+  * Only the coordinates are kept from each keypoint; scale, angle and response
+  * are not needed once the descriptor exists. Descriptors are stored as bytes:
+- * OpenCV returns floats, but every value measured across the corpus was an
+- * integer in 0..220, so this is lossless. Verified to give bit-identical
+- * results at a quarter of the size, 17 KB per capture instead of 70 KB.
++ * SIFT descriptors are rounded and clamped to bytes. This is the existing
++ * version-1 format; changing it would require template migration.
+  */
+ GBytes *
+-fpi_egis0570touch_features_serialise (Egis0570TouchFeatures *features)
++fpi_egis0570touch_features_serialise (Egis0570TouchFeatures *features) try
+ {
+-  if (features == nullptr || features->descriptors.cols != 128)
++  if (features == nullptr || features->keypoints.empty () ||
++      features->descriptors.cols != 128)
+     return nullptr;
+ 
+   const uint16_t count = static_cast<uint16_t> (
+@@ -239,7 +241,7 @@ fpi_egis0570touch_features_serialise (Egis0570TouchFeatures *features)
+                       static_cast<size_t> (count) * 2 * sizeof (float) +
+                       static_cast<size_t> (count) * 128;
+ 
+-  auto *buffer = static_cast<uint8_t *> (g_malloc (size));
++  g_autofree uint8_t *buffer = static_cast<uint8_t *> (g_malloc (size));
+   size_t offset = 0;
+ 
+   write_u32_le (buffer + offset, kBlobMagic); offset += 4;
+@@ -263,11 +265,15 @@ fpi_egis0570touch_features_serialise (Egis0570TouchFeatures *features)
+       offset += 128;
+     }
+ 
+-  return g_bytes_new_take (buffer, size);
++  return g_bytes_new_take (g_steal_pointer (&buffer), size);
++}
++catch (const std::exception &)
++{
++  return nullptr;
+ }
+ 
+ Egis0570TouchFeatures *
+-fpi_egis0570touch_features_deserialise (GBytes *blob)
++fpi_egis0570touch_features_deserialise (GBytes *blob) try
+ {
+   if (blob == nullptr)
+     return nullptr;
+@@ -289,7 +295,7 @@ fpi_egis0570touch_features_deserialise (GBytes *blob)
+   if (size != expected)
+     return nullptr;
+ 
+-  auto *features = new _Egis0570TouchFeatures;
++  auto features = std::make_unique<_Egis0570TouchFeatures> ();
+   features->keypoints.reserve (count);
+   features->descriptors = cv::Mat (count, 128, CV_32F);
+ 
+@@ -304,10 +310,7 @@ fpi_egis0570touch_features_deserialise (GBytes *blob)
+       if (!std::isfinite (xy[0]) || !std::isfinite (xy[1]) ||
+           xy[0] < 0 || xy[1] < 0 ||
+           xy[0] >= kWidth * kUpscale || xy[1] >= kHeight * kUpscale)
+-        {
+-          delete features;
+-          return nullptr;
+-        }
++        return nullptr;
+       features->keypoints.emplace_back (cv::Point2f (xy[0], xy[1]), 1.0f);
+     }
+ 
+@@ -319,12 +322,16 @@ fpi_egis0570touch_features_deserialise (GBytes *blob)
+       offset += 128;
+     }
+ 
+-  return features;
++  return features.release ();
++}
++catch (const std::exception &)
++{
++  return nullptr;
+ }
+ 
+ guint
+ fpi_egis0570touch_features_compare (Egis0570TouchFeatures *probe,
+-                           Egis0570TouchFeatures *gallery)
++                                  Egis0570TouchFeatures *gallery) try
+ {
+   if (probe == nullptr || gallery == nullptr)
+     return 0;
+@@ -363,6 +370,11 @@ fpi_egis0570touch_features_compare (Egis0570TouchFeatures *probe,
+ 
+   return static_cast<guint> (cv::countNonZero (inliers));
+ }
++catch (const std::exception &)
++{
++  /* A failed comparison must never authenticate. */
++  return 0;
++}
+ 
+ void
+ fpi_egis0570touch_features_free (Egis0570TouchFeatures *features)
+diff --git a/libfprint/drivers/egis0570touch-proto.h b/libfprint/drivers/egis0570touch-proto.h
+index 42193bac..829b256f 100644
+--- a/libfprint/drivers/egis0570touch-proto.h
++++ b/libfprint/drivers/egis0570touch-proto.h
+@@ -26,7 +26,6 @@
+  * Device data
+  */
+ 
+-#define EGIS0570_CONF 1
+ #define EGIS0570_INTF 0
+ 
+ /*
+@@ -54,7 +53,7 @@
+ 
+ #define EGIS0570_INIT_TOTAL (sizeof ((init_pkts)) / sizeof ((init_pkts[0])))
+ 
+-static unsigned char init_pkts[][EGIS0570_PKTSIZE] = {
++static const unsigned char init_pkts[][EGIS0570_PKTSIZE] = {
+ 	{0x45, 0x47, 0x49, 0x53, 0x01, 0x10, 0x00},
+ 	{0x45, 0x47, 0x49, 0x53, 0x01, 0x11, 0x38},
+ 	{0x45, 0x47, 0x49, 0x53, 0x01, 0x12, 0x00},
+@@ -109,7 +108,7 @@ static unsigned char init_pkts[][EGIS0570_PKTSIZE] = {
+ 
+ #define EGIS0570_REPEAT_TOTAL (sizeof ((repeat_pkts)) / sizeof ((repeat_pkts[0])))
+ 
+-static unsigned char repeat_pkts[][EGIS0570_PKTSIZE] =
++static const unsigned char repeat_pkts[][EGIS0570_PKTSIZE] =
+ {
+   { 0x45, 0x47, 0x49, 0x53, 0x01, 0x02, 0x0f },
+   { 0x45, 0x47, 0x49, 0x53, 0x00, 0x02, 0x0f },
+diff --git a/libfprint/drivers/egis0570touch.c b/libfprint/drivers/egis0570touch.c
+index 07cb40d9..0b6cf079 100644
+--- a/libfprint/drivers/egis0570touch.c
++++ b/libfprint/drivers/egis0570touch.c
+@@ -10,7 +10,10 @@
+ 
+ #define FRAME_PIXELS (EGIS0570_IMGWIDTH * EGIS0570_IMGHEIGHT)
+ #define MAX_FRAMES 50
++#define AUTH_FRAMES 10
+ #define ENROLL_STAGES 12
++#define MIN_FEATURES 20
++#define RELEASE_FRAMES 5
+ /* Provisional research threshold, not a measured false-accept guarantee. */
+ #define MATCH_THRESHOLD 12
+ 
+@@ -22,6 +25,7 @@ struct _FpDeviceEgis0570Touch
+   gboolean initializing;
+   gboolean calibrated;
+   gboolean present;
++  gboolean wait_for_removal;
+   guint absent_frames;
+   guint frame_count;
+   guint16 background[FRAME_PIXELS];
+@@ -35,16 +39,32 @@ G_DECLARE_FINAL_TYPE (FpDeviceEgis0570Touch, fpi_device_egis0570touch,
+                       FPI, DEVICE_EGIS0570TOUCH, FpDevice);
+ G_DEFINE_TYPE (FpDeviceEgis0570Touch, fpi_device_egis0570touch, FP_TYPE_DEVICE);
+ 
+-enum { SEND_COMMAND, RECEIVE_REPLY, RECEIVE_FRAMES, PROCESS_FRAMES, N_STATES };
++enum { SEND_COMMAND, RECEIVE_REPLY, RECEIVE_FRAMES, PROCESS_FRAMES, MATCH_FRAMES, N_STATES };
++
++/* Owned by a GTask. Templates are immutable snapshots; only the main thread
++ * accesses FpPrint objects or reports results to libfprint. */
++typedef struct
++{
++  FpiDeviceAction action;
++  GPtrArray *templates;
++  GBytes *enrollment;
++} MatchData;
++
++static void
++match_data_free (MatchData *data)
++{
++  g_ptr_array_unref (data->templates);
++  g_clear_pointer (&data->enrollment, g_bytes_unref);
++  g_free (data);
++}
+ 
+ static guint
+-compare_print (Egis0570TouchFeatures *probe, FpPrint *print, gboolean stop_on_match)
++compare_print (Egis0570TouchFeatures *probe, GVariant *data, gboolean stop_on_match,
++               GCancellable *cancellable)
+ {
+-  g_autoptr(GVariant) data = NULL;
+   g_autoptr(GVariant) samples = NULL;
+   guint version;
+   guint best = 0;
+-  g_object_get (print, "fpi-data", &data, NULL);
+   if (!data || !g_variant_is_of_type (data, G_VARIANT_TYPE ("(uaay)")))
+     return 0;
+   g_variant_get (data, "(u@aay)", &version, &samples);
+@@ -52,13 +72,16 @@ compare_print (Egis0570TouchFeatures *probe, FpPrint *print, gboolean stop_on_ma
+     return 0;
+   for (gsize i = 0; i < g_variant_n_children (samples); i++)
+     {
++      if (g_cancellable_is_cancelled (cancellable))
++        break;
+       g_autoptr(GVariant) sample = g_variant_get_child_value (samples, i);
+       gsize size;
+       const guint8 *bytes = g_variant_get_fixed_array (sample, &size, 1);
+       g_autoptr(GBytes) blob = g_bytes_new (bytes, size);
+       g_autoptr(Egis0570TouchFeatures) gallery = fpi_egis0570touch_features_deserialise (blob);
+-      guint score = MIN (fpi_egis0570touch_features_compare (probe, gallery),
+-                         fpi_egis0570touch_features_compare (gallery, probe));
++      guint forward = fpi_egis0570touch_features_compare (probe, gallery);
++      guint reverse = fpi_egis0570touch_features_compare (gallery, probe);
++      guint score = MIN (forward, reverse);
+       fp_dbg ("Sample %zu score %u (experimental threshold %u)", i, score, MATCH_THRESHOLD);
+       best = MAX (best, score);
+       if (stop_on_match && best >= MATCH_THRESHOLD)
+@@ -67,24 +90,12 @@ compare_print (Egis0570TouchFeatures *probe, FpPrint *print, gboolean stop_on_ma
+   return best;
+ }
+ 
+-static guint
+-compare_press (GPtrArray *probes, FpPrint *print, gboolean stop_on_match)
+-{
+-  guint best = 0;
+-  for (guint i = 0; i < probes->len; i++)
+-    {
+-      best = MAX (best, compare_print (g_ptr_array_index (probes, i), print, stop_on_match));
+-      if (stop_on_match && best >= MATCH_THRESHOLD)
+-        break;
+-    }
+-  return best;
+-}
+-
+ static void
+ report_retry (FpDevice *dev)
+ {
+-  GError *error = fpi_device_retry_new (FP_DEVICE_RETRY_GENERAL);
+   FpDeviceEgis0570Touch *self = FPI_DEVICE_EGIS0570TOUCH (dev);
++  GError *error = fpi_device_retry_new (self->present ? FP_DEVICE_RETRY_REMOVE_FINGER :
++                                      FP_DEVICE_RETRY_GENERAL);
+   switch ((gint) fpi_device_get_current_action (dev))
+     {
+     case FPI_DEVICE_ACTION_ENROLL:
+@@ -105,87 +116,105 @@ report_retry (FpDevice *dev)
+ }
+ 
+ static void
+-process_press (FpDevice *dev)
++match_frames (GTask *task, gpointer source_object, gpointer task_data,
++              GCancellable *cancellable)
+ {
+-  FpDeviceEgis0570Touch *self = FPI_DEVICE_EGIS0570TOUCH (dev);
+-  g_autoptr(GPtrArray) probes = g_ptr_array_new_with_free_func (
+-    (GDestroyNotify) fpi_egis0570touch_features_free);
+-  Egis0570TouchFeatures *features = NULL;
+-  if (self->frame_count >= 10)
++  FpDeviceEgis0570Touch *self = source_object;
++  MatchData *data = task_data;
++  g_autoptr(Egis0570TouchFeatures) features = NULL;
++  gint winner = -1;
++  guint best = MATCH_THRESHOLD - 1;
++
++  /* The USB state machine is paused until this task finishes. */
++  if (g_task_return_error_if_cancelled (task))
++    return;
++  if (self->frame_count >= AUTH_FRAMES)
++    features = fpi_egis0570touch_features_extract (self->frames, self->frame_count,
++                                                 self->background);
++  if (fpi_egis0570touch_features_keypoint_count (features) < MIN_FEATURES)
+     {
+-      guint group_size = fpi_device_get_current_action (dev) == FPI_DEVICE_ACTION_ENROLL
+-                         ? MAX_FRAMES : 10;
+-      for (guint offset = 0; offset < self->frame_count; offset += group_size)
++      g_task_return_error (task, fpi_device_retry_new (FP_DEVICE_RETRY_GENERAL));
++      return;
++    }
++  if (data->action == FPI_DEVICE_ACTION_ENROLL)
++    {
++      data->enrollment = fpi_egis0570touch_features_serialise (features);
++      if (!data->enrollment)
+         {
+-          Egis0570TouchFeatures *candidate = fpi_egis0570touch_features_extract (
+-            self->frames + offset * FRAME_PIXELS,
+-            MIN (group_size, self->frame_count - offset), self->background);
+-          if (!candidate)
+-            continue;
+-          g_ptr_array_add (probes, candidate);
+-          if (!features || fpi_egis0570touch_features_keypoint_count (candidate) >
+-                           fpi_egis0570touch_features_keypoint_count (features))
+-            features = candidate;
++          g_task_return_error (task, fpi_device_retry_new (FP_DEVICE_RETRY_GENERAL));
++          return;
+         }
+     }
+-  fp_dbg ("Press: %u frames, %u descriptors", self->frame_count,
+-           fpi_egis0570touch_features_keypoint_count (features));
+-  if (!features || fpi_egis0570touch_features_keypoint_count (features) < 20)
++  for (guint i = 0; i < data->templates->len; i++)
++    {
++      if (g_task_return_error_if_cancelled (task))
++        return;
++      guint score = compare_print (features, g_ptr_array_index (data->templates, i),
++                                   data->action == FPI_DEVICE_ACTION_VERIFY, cancellable);
++      if (score > best)
++        {
++          best = score;
++          winner = i;
++        }
++    }
++  g_task_return_int (task, winner);
++}
++
++static void
++match_done (GObject *source_object, GAsyncResult *result, gpointer unused)
++{
++  FpDevice *dev = FP_DEVICE (source_object);
++  FpDeviceEgis0570Touch *self = FPI_DEVICE_EGIS0570TOUCH (dev);
++  MatchData *data = g_task_get_task_data (G_TASK (result));
++  g_autoptr(GError) error = NULL;
++  gint winner = g_task_propagate_int (G_TASK (result), &error);
++
++  if (error)
+     {
++      if (error->domain != FP_DEVICE_RETRY)
++        {
++          fpi_ssm_mark_failed (self->ssm, g_steal_pointer (&error));
++          return;
++        }
+       report_retry (dev);
+-      return;
+     }
+-  switch ((gint) fpi_device_get_current_action (dev))
++  else switch ((gint) data->action)
+     {
+     case FPI_DEVICE_ACTION_ENROLL:
+-      {
+-        GBytes *blob = fpi_egis0570touch_features_serialise (features);
+-        if (!blob)
+-          {
+-            report_retry (dev);
+-            return;
+-          }
+-        g_ptr_array_add (self->blobs, blob);
+-        fpi_device_enroll_progress (dev, self->blobs->len, NULL, NULL);
+-        self->finished = self->blobs->len == ENROLL_STAGES;
+-        break;
+-      }
++      g_ptr_array_add (self->blobs, g_steal_pointer (&data->enrollment));
++      fpi_device_enroll_progress (dev, self->blobs->len, NULL, NULL);
++      self->finished = self->blobs->len == ENROLL_STAGES;
++      break;
+     case FPI_DEVICE_ACTION_VERIFY:
+-      {
+-        FpPrint *print;
+-        fpi_device_get_verify_data (dev, &print);
+-        gboolean match = compare_press (probes, print, TRUE) >= MATCH_THRESHOLD;
+-        fpi_device_verify_report (dev, match ? FPI_MATCH_SUCCESS : FPI_MATCH_FAIL,
+-                                  NULL, NULL);
+-        self->finished = TRUE;
+-        break;
+-      }
++      fpi_device_verify_report (dev, winner >= 0 ? FPI_MATCH_SUCCESS : FPI_MATCH_FAIL,
++                                NULL, NULL);
++      self->finished = TRUE;
++      break;
+     case FPI_DEVICE_ACTION_IDENTIFY:
+       {
+         GPtrArray *prints;
+-        FpPrint *winner = NULL;
+-        guint best = MATCH_THRESHOLD - 1;
+         fpi_device_get_identify_data (dev, &prints);
+-        for (guint i = 0; i < prints->len; i++)
+-          {
+-            FpPrint *print = g_ptr_array_index (prints, i);
+-            guint score = compare_press (probes, print, FALSE);
+-            if (score > best)
+-              {
+-                best = score;
+-                winner = print;
+-              }
+-          }
+-        fpi_device_identify_report (dev, winner, NULL, NULL);
++        fpi_device_identify_report (dev, winner >= 0 ? g_ptr_array_index (prints, winner) : NULL,
++                                    NULL, NULL);
+         self->finished = TRUE;
+         break;
+       }
+     default:
+       g_assert_not_reached ();
+     }
++  self->frame_count = 0;
++  if (self->finished)
++    fpi_ssm_mark_completed (self->ssm);
++  else
++    {
++      fpi_device_report_finger_status (dev, FP_FINGER_STATUS_NEEDED);
++      self->initializing = FALSE;
++      self->command = 0;
++      fpi_ssm_jump_to_state (self->ssm, SEND_COMMAND);
++    }
+ }
+ 
+-static void
++static gboolean
+ process_packet (FpDevice *dev)
+ {
+   FpDeviceEgis0570Touch *self = FPI_DEVICE_EGIS0570TOUCH (dev);
+@@ -199,7 +228,7 @@ process_packet (FpDevice *dev)
+         }
+       self->calibrated = TRUE;
+       fpi_device_report_finger_status (dev, FP_FINGER_STATUS_NEEDED);
+-      return;
++      return FALSE;
+     }
+   for (guint k = 0; k < EGIS0570_IMGCOUNT && !self->finished; k++)
+     {
+@@ -208,6 +237,19 @@ process_packet (FpDevice *dev)
+       for (guint i = 20 * EGIS0570_IMGWIDTH; i < 37 * EGIS0570_IMGWIDTH; i++)
+         mean += MAX (0, (int) frame[i] - self->background[i]);
+       mean /= 17 * EGIS0570_IMGWIDTH;
++      /* Do not treat one held finger as several operations after a retry. */
++      if (self->wait_for_removal)
++        {
++          if (mean > EGIS0570_MIN_MEAN)
++            self->absent_frames = 0;
++          else if (++self->absent_frames >= RELEASE_FRAMES)
++            {
++              self->wait_for_removal = FALSE;
++              self->present = FALSE;
++              fpi_device_report_finger_status (dev, FP_FINGER_STATUS_NEEDED);
++            }
++          continue;
++        }
+       if (mean > EGIS0570_MIN_MEAN)
+         {
+           self->absent_frames = 0;
+@@ -231,17 +273,19 @@ process_packet (FpDevice *dev)
+           self->scores[slot] = mean;
+           for (guint i = 0; i < FRAME_PIXELS; i++)
+             self->frames[slot * FRAME_PIXELS + i] = frame[i];
++          /* Authentication uses one batch; enrollment waits for removal. */
++          if (self->frame_count == AUTH_FRAMES &&
++              fpi_device_get_current_action (dev) != FPI_DEVICE_ACTION_ENROLL)
++            return TRUE;
+         }
+-      else if (self->present && ++self->absent_frames >= 5)
++      else if (self->present && ++self->absent_frames >= RELEASE_FRAMES)
+         {
+           self->present = FALSE;
+           fpi_device_report_finger_status (dev, FP_FINGER_STATUS_NONE);
+-          process_press (dev);
+-          self->frame_count = 0;
+-          if (!self->finished)
+-            fpi_device_report_finger_status (dev, FP_FINGER_STATUS_NEEDED);
++          return TRUE;
+         }
+     }
++  return FALSE;
+ }
+ 
+ static void
+@@ -307,9 +351,8 @@ run_state (FpiSsm *ssm, FpDevice *dev)
+       fpi_usb_transfer_submit (transfer, EGIS0570_TIMEOUT, NULL, receive_frames_cb, NULL);
+       break;
+     case PROCESS_FRAMES:
+-      process_packet (dev);
+-      if (self->finished)
+-        fpi_ssm_mark_completed (ssm);
++      if (process_packet (dev))
++        fpi_ssm_next_state (ssm);
+       else
+         {
+           self->initializing = FALSE;
+@@ -317,6 +360,36 @@ run_state (FpiSsm *ssm, FpDevice *dev)
+           fpi_ssm_jump_to_state (ssm, SEND_COMMAND);
+         }
+       break;
++    case MATCH_FRAMES:
++      {
++        MatchData *data = g_new0 (MatchData, 1);
++        g_autoptr(GTask) task = g_task_new (dev, fpi_device_get_cancellable (dev),
++                                          match_done, NULL);
++        g_autoptr(GPtrArray) single = g_ptr_array_new ();
++        GPtrArray *prints = single;
++        data->action = fpi_device_get_current_action (dev);
++        data->templates = g_ptr_array_new_with_free_func ((GDestroyNotify) g_variant_unref);
++        if (data->action == FPI_DEVICE_ACTION_VERIFY)
++          {
++            FpPrint *print;
++            fpi_device_get_verify_data (dev, &print);
++            g_ptr_array_add (single, print);
++          }
++        else if (data->action == FPI_DEVICE_ACTION_IDENTIFY)
++          fpi_device_get_identify_data (dev, &prints);
++        for (guint i = 0; i < prints->len; i++)
++          {
++            GVariant *template = NULL;
++            g_object_get (g_ptr_array_index (prints, i), "fpi-data", &template, NULL);
++            /* Keep indices even for an old or invalid template. */
++            if (!template)
++              template = g_variant_ref_sink (g_variant_new_tuple (NULL, 0));
++            g_ptr_array_add (data->templates, template);
++          }
++        g_task_set_task_data (task, data, (GDestroyNotify) match_data_free);
++        g_task_run_in_thread (task, match_frames);
++      }
++      break;
+     default:
+       g_assert_not_reached ();
+     }
+@@ -370,10 +443,13 @@ start_operation (FpDevice *dev)
+   FpDeviceEgis0570Touch *self = FPI_DEVICE_EGIS0570TOUCH (dev);
+   self->command = 0;
+   self->initializing = TRUE;
+-  self->present = FALSE;
++  self->wait_for_removal = self->present;
+   self->finished = FALSE;
+   self->absent_frames = 0;
+   self->frame_count = 0;
++  if (self->calibrated)
++    fpi_device_report_finger_status (dev, self->wait_for_removal ? FP_FINGER_STATUS_PRESENT :
++                                    FP_FINGER_STATUS_NEEDED);
+   g_ptr_array_set_size (self->blobs, 0);
+   self->ssm = fpi_ssm_new (dev, run_state, N_STATES);
+   fpi_ssm_start (self->ssm, operation_complete);
+@@ -386,8 +462,12 @@ dev_open (FpDevice *dev)
+   /* Keep the empty-sensor reference across operations on one open device.
+    * Recalibrating after every verification can mistake the next touch for
+    * background when the user presents their finger before capture starts. */
+-  FPI_DEVICE_EGIS0570TOUCH (dev)->calibrated = FALSE;
+-  g_usb_device_claim_interface (fpi_device_get_usb_device (dev), 0, 0, &error);
++  FpDeviceEgis0570Touch *self = FPI_DEVICE_EGIS0570TOUCH (dev);
++  /* If the previous operation ended with a finger down, retain its reference
++   * until removal rather than calibrating that held finger as background. */
++  if (!self->present)
++    self->calibrated = FALSE;
++  g_usb_device_claim_interface (fpi_device_get_usb_device (dev), EGIS0570_INTF, 0, &error);
+   fpi_device_open_complete (dev, error);
+ }
+ 
+@@ -395,7 +475,7 @@ static void
+ dev_close (FpDevice *dev)
+ {
+   GError *error = NULL;
+-  g_usb_device_release_interface (fpi_device_get_usb_device (dev), 0, 0, &error);
++  g_usb_device_release_interface (fpi_device_get_usb_device (dev), EGIS0570_INTF, 0, &error);
+   fpi_device_close_complete (dev, error);
+ }
+ 
+diff --git a/tests/meson.build b/tests/meson.build
+index 764bd3c7..129a386b 100644
+--- a/tests/meson.build
++++ b/tests/meson.build
+@@ -477,4 +477,9 @@ if 'egis0570touch' in drivers
+         link_with: libfprint_drivers,
+         override_options: ['cpp_std=c++17'])
+     test('egis0570touch-storage', egis_touch_test, suite: 'unit-tests')
++    egis_driver_test = executable('test-egis0570touch-driver',
++        'test-egis0570touch-driver.c',
++        dependencies: libfprint_private_dep,
++        link_with: libfprint_drivers)
++    test('egis0570touch-driver', egis_driver_test, suite: 'unit-tests')
+ endif
+diff --git a/tests/test-egis0570touch-driver.c b/tests/test-egis0570touch-driver.c
+new file mode 100644
+index 00000000..398f2182
+--- /dev/null
++++ b/tests/test-egis0570touch-driver.c
+@@ -0,0 +1,183 @@
++/* Synthetic capture/worker tests, not biometric accuracy tests. LGPL-2.1-or-later.
++ * Include the driver to exercise its private state without exporting test APIs.
++ * USB entry points are replaced; no physical reader or fingerprint data is used.
++ */
++#include "drivers/egis0570touch.c"
++
++static void fake_open (FpDevice *dev) { fpi_device_open_complete (dev, NULL); }
++static void fake_close (FpDevice *dev) { fpi_device_close_complete (dev, NULL); }
++static void fake_start (FpDevice *dev) { }
++
++static FpDeviceEgis0570Touch *
++new_device (void)
++{
++  g_autoptr(FpDeviceClass) klass = g_type_class_ref (fpi_device_egis0570touch_get_type ());
++  klass->type = FP_DEVICE_TYPE_VIRTUAL;
++  klass->open = fake_open;
++  klass->close = fake_close;
++  klass->verify = fake_start;
++  klass->enroll = fake_start;
++  FpDeviceEgis0570Touch *self = g_object_new (fpi_device_egis0570touch_get_type (), NULL);
++  g_assert_true (fp_device_open_sync (FP_DEVICE (self), NULL, NULL));
++  return self;
++}
++
++static void
++discard_operation (GObject *object, GAsyncResult *result, gpointer user_data)
++{
++  gboolean *done = user_data;
++  g_autoptr(GError) error = NULL;
++  g_assert_false (g_task_propagate_boolean (G_TASK (result), &error));
++  g_assert_nonnull (error);
++  *done = TRUE;
++}
++
++static void
++capture (gconstpointer action_ptr)
++{
++  FpiDeviceAction action = GPOINTER_TO_INT (action_ptr);
++  g_autoptr(FpDeviceEgis0570Touch) self = new_device ();
++  FpDevice *dev = FP_DEVICE (self);
++  g_autoptr(FpPrint) print = g_object_ref_sink (fp_print_new (dev));
++  gboolean done = FALSE;
++  if (action == FPI_DEVICE_ACTION_ENROLL)
++    fp_device_enroll (dev, print, NULL, NULL, NULL, NULL, discard_operation, &done);
++  else
++    {
++      fpi_print_set_type (print, FPI_PRINT_RAW);
++      fp_device_verify (dev, print, NULL, NULL, NULL, NULL, discard_operation, &done);
++    }
++  g_assert_cmpint (fpi_device_get_current_action (dev), ==, action);
++
++  /* First empty packet calibrates; two foreground packets yield ten frames. */
++  memset (self->packet, 0, sizeof (self->packet));
++  g_assert_false (process_packet (dev));
++  memset (self->packet, 100, sizeof (self->packet));
++  g_assert_false (process_packet (dev));
++  g_assert_cmpuint (self->frame_count, ==, 5);
++  g_assert_cmpint (process_packet (dev), ==, action != FPI_DEVICE_ACTION_ENROLL);
++  g_assert_cmpuint (self->frame_count, ==, AUTH_FRAMES);
++  g_assert_true (self->present);
++
++  if (action == FPI_DEVICE_ACTION_ENROLL)
++    {
++      for (guint i = 0; i < 20; i++)
++        g_assert_false (process_packet (dev));
++      g_assert_cmpuint (self->frame_count, ==, MAX_FRAMES);
++    }
++  else
++    {
++      /* A subsequent operation must not collect the same held touch again. */
++      self->wait_for_removal = self->present;
++      self->frame_count = 0;
++      for (guint i = 0; i < 3; i++)
++        g_assert_false (process_packet (dev));
++      g_assert_cmpuint (self->frame_count, ==, 0);
++    }
++  memset (self->packet, 0, sizeof (self->packet));
++  g_assert_cmpint (process_packet (dev), ==, action == FPI_DEVICE_ACTION_ENROLL);
++  g_assert_false (self->present);
++  g_assert_false (self->wait_for_removal);
++  self->frame_count = 0;
++  memset (self->packet, 100, sizeof (self->packet));
++  g_assert_false (process_packet (dev));
++  g_assert_cmpuint (self->frame_count, ==, 5);
++
++  fpi_device_action_error (dev, fpi_device_error_new (FP_DEVICE_ERROR_GENERAL));
++  while (!done)
++    g_main_context_iteration (NULL, TRUE);
++  g_assert_true (fp_device_close_sync (dev, NULL, NULL));
++}
++
++static void
++worker_done (GObject *object, GAsyncResult *result, gpointer user_data)
++{
++  GAsyncResult **saved = user_data;
++  *saved = g_object_ref (result);
++}
++
++static void
++worker (gconstpointer cancel_ptr)
++{
++  gboolean cancel = GPOINTER_TO_INT (cancel_ptr);
++  g_autoptr(FpDeviceEgis0570Touch) self = new_device ();
++  g_autoptr(GCancellable) cancellable = g_cancellable_new ();
++  g_autoptr(GAsyncResult) result = NULL;
++  g_autoptr(GTask) task = g_task_new (self, cancellable, worker_done, &result);
++  g_autoptr(GError) error = NULL;
++  MatchData *data = g_new0 (MatchData, 1);
++  data->action = FPI_DEVICE_ACTION_VERIFY;
++  data->templates = g_ptr_array_new_with_free_func ((GDestroyNotify) g_variant_unref);
++  g_task_set_task_data (task, data, (GDestroyNotify) match_data_free);
++  self->frame_count = AUTH_FRAMES;
++  memset (self->frames, 0, AUTH_FRAMES * FRAME_PIXELS * sizeof (*self->frames));
++  if (cancel)
++    g_cancellable_cancel (cancellable);
++  g_task_run_in_thread (task, match_frames);
++  while (!result)
++    g_main_context_iteration (NULL, TRUE);
++  g_assert_cmpint (g_task_propagate_int (G_TASK (result), &error), ==, -1);
++  if (cancel)
++    g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
++  else
++    g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_GENERAL);
++  g_assert_true (fp_device_close_sync (FP_DEVICE (self), NULL, NULL));
++}
++
++static void
++worker_match (gconstpointer identify_ptr)
++{
++  gboolean identify = GPOINTER_TO_INT (identify_ptr);
++  g_autoptr(FpDeviceEgis0570Touch) self = new_device ();
++  g_autoptr(GAsyncResult) result = NULL;
++  g_autoptr(GTask) task = g_task_new (self, NULL, worker_done, &result);
++  MatchData *data = g_new0 (MatchData, 1);
++  data->action = identify ? FPI_DEVICE_ACTION_IDENTIFY : FPI_DEVICE_ACTION_VERIFY;
++  data->templates = g_ptr_array_new_with_free_func ((GDestroyNotify) g_variant_unref);
++  g_task_set_task_data (task, data, (GDestroyNotify) match_data_free);
++  guint32 state = 123456789;
++  for (guint i = 0; i < FRAME_PIXELS; i++)
++    {
++      state ^= state << 13;
++      state ^= state >> 17;
++      state ^= state << 5;
++      self->frames[i] = state & 255;
++    }
++  for (guint i = 1; i < AUTH_FRAMES; i++)
++    memcpy (self->frames + i * FRAME_PIXELS, self->frames, FRAME_PIXELS * sizeof (*self->frames));
++  self->frame_count = AUTH_FRAMES;
++  g_autoptr(Egis0570TouchFeatures) features =
++    fpi_egis0570touch_features_extract (self->frames, 1, self->background);
++  g_assert_nonnull (features);
++  g_autoptr(GBytes) blob = fpi_egis0570touch_features_serialise (features);
++  g_assert_nonnull (blob);
++  gsize size;
++  gconstpointer bytes = g_bytes_get_data (blob, &size);
++  GVariantBuilder builder;
++  g_variant_builder_init (&builder, G_VARIANT_TYPE ("aay"));
++  for (guint i = 0; i < ENROLL_STAGES; i++)
++    g_variant_builder_add_value (&builder, g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE, bytes, size, 1));
++  if (identify)
++    g_ptr_array_add (data->templates, g_variant_ref_sink (g_variant_new_tuple (NULL, 0)));
++  g_ptr_array_add (data->templates, g_variant_ref_sink (g_variant_new ("(uaay)", 1u, &builder)));
++  g_task_run_in_thread (task, match_frames);
++  while (!result)
++    g_main_context_iteration (NULL, TRUE);
++  g_autoptr(GError) error = NULL;
++  g_assert_cmpint (g_task_propagate_int (G_TASK (result), &error), ==, identify ? 1 : 0);
++  g_assert_no_error (error);
++  g_assert_true (fp_device_close_sync (FP_DEVICE (self), NULL, NULL));
++}
++
++int
++main (int argc, char **argv)
++{
++  g_test_init (&argc, &argv, NULL);
++  g_test_add_data_func ("/egis0570touch/held-touch", GINT_TO_POINTER (FPI_DEVICE_ACTION_VERIFY), capture);
++  g_test_add_data_func ("/egis0570touch/enroll-release", GINT_TO_POINTER (FPI_DEVICE_ACTION_ENROLL), capture);
++  g_test_add_data_func ("/egis0570touch/worker-empty", GINT_TO_POINTER (FALSE), worker);
++  g_test_add_data_func ("/egis0570touch/worker-cancelled", GINT_TO_POINTER (TRUE), worker);
++  g_test_add_data_func ("/egis0570touch/worker-verify", GINT_TO_POINTER (FALSE), worker_match);
++  g_test_add_data_func ("/egis0570touch/worker-identify", GINT_TO_POINTER (TRUE), worker_match);
++  return g_test_run ();
++}
+-- 
+2.55.0
+
