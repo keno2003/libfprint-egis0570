@@ -95,7 +95,7 @@ status has not been established. The full test suite is not claimed to pass.
 
 Upstream contributions belong on
 [freedesktop GitLab](https://gitlab.freedesktop.org/libfprint/libfprint/-/merge_requests).
-There is no upstream merge request yet.
+The contribution is open as [draft merge request !662](https://gitlab.freedesktop.org/libfprint/libfprint/-/merge_requests/662).
 
 ## Attribution and license
 
